@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Behaviour Cloning - Robotics Learning Notes</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css?v=4" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="index.html">Robotics Learning Notes</a>
+      <nav aria-label="Main navigation">
+        <a class="nav-link" href="index.html">Welcome!</a>
+        <a class="nav-link active" href="behaviour-cloning.html">Behaviour Cloning</a>
+        <a class="nav-link" href="act.html">ACT</a>
+        <a class="nav-link" href="diffusion.html">Diffusion Model</a>
+      </nav>
+    </header>
+
+    <main class="page-shell">
+      <article class="article-layout">
+        <aside class="article-kicker" aria-label="Article summary">
+          <span class="section-label">Policy 01</span>
+          <p>Imitation learning copies expert behaviour by training a policy to match demonstrated actions.</p>
+        </aside>
+
+        <section class="article-content">
+          <p class="eyebrow">Robot Learning</p>
+          <h1>Behaviour Cloning</h1>
+          <p class="subtitle">The most straightforward form of imitation learning.</p>
+
+          <p>
+            Let's start with the most straightforward one: imitation learning. This technique is simple and yet quite
+            powerful, especially for simpler tasks or smaller MLP architectures.
+          </p>
+
+          <h2>Main Concept</h2>
+          <p>
+            The main concept is exactly what its name sounds like: copying actions from expert behaviour. You show the
+            robot how to do the task through teleoperation or another demonstration method. Then the model learns a policy
+            that maps states or observations to the expert actions it saw in the demonstrations.
+          </p>
+
+          <h2>Loss Functions</h2>
+          <p>Two common supervised loss functions for imitation learning are negative log likelihood and mean squared error.</p>
+
+          <h3>Negative Log Likelihood</h3>
+          <p>For classification, we use the negative log likelihood:</p>
+          <div class="formula">
+            NLL(&theta;) = -1/N &sum;<sub>i=1</sub><sup>N</sup>
+            log &pi;<sub>&theta;</sub>(a<sub>i</sub> | s<sub>i</sub>)
+          </div>
+
+          <dl class="term-list">
+            <div>
+              <dt>&pi;</dt>
+              <dd>policy</dd>
+            </div>
+            <div>
+              <dt>a</dt>
+              <dd>action</dd>
+            </div>
+            <div>
+              <dt>s</dt>
+              <dd>state</dd>
+            </div>
+          </dl>
+
+          <p>
+            You can think of <code>&pi;<sub>&theta;</sub>(a<sub>i</sub> | s<sub>i</sub>)</code> as the probability that the
+            policy assigns to the expert action <code>a<sub>i</sub></code> given the state <code>s<sub>i</sub></code>.
+          </p>
+
+          <h3>Mean Squared Error</h3>
+          <p>For continuous action outputs, we use the mean squared error:</p>
+          <div class="formula">
+            L<sub>MSE</sub>(&theta;) =
+            1/N &sum;<sub>i=1</sub><sup>N</sup>
+            ||a<sub>i</sub> - &pi;<sub>&theta;</sub>(s<sub>i</sub>)||<sup>2</sup>
+          </div>
+
+          <dl class="term-list">
+            <div>
+              <dt>&pi;</dt>
+              <dd>policy</dd>
+            </div>
+            <div>
+              <dt>a</dt>
+              <dd>action</dd>
+            </div>
+            <div>
+              <dt>s</dt>
+              <dd>state</dd>
+            </div>
+          </dl>
+
+          <p>
+            You can think of it like the difference between the actual expert actions and the actions computed by the
+            policy given the state.
+          </p>
+
+          <h2>Example Code</h2>
+          <p>This full example trains a behaviour cloning policy from expert demonstrations, then renders a rollout.</p>
+          <details class="code-details">
+            <summary>View full behaviour cloning example</summary>
+            <pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import mujoco
+import imageio
+
+
+XML = &quot;&quot;&quot;
+&lt;mujoco&gt;
+  &lt;option timestep=&quot;0.02&quot; gravity=&quot;0 0 -9.81&quot;/&gt;
+
+  &lt;worldbody&gt;
+    &lt;light pos=&quot;0 0 3&quot;/&gt;
+    &lt;camera name=&quot;cam&quot; pos=&quot;1.2 -1.2 0.9&quot; xyaxes=&quot;1 1 0 -0.4 0.4 1&quot;/&gt;
+
+    &lt;geom name=&quot;table&quot; type=&quot;box&quot; pos=&quot;0 0 0&quot; size=&quot;0.6 0.4 0.03&quot; rgba=&quot;0.6 0.6 0.6 1&quot;/&gt;
+
+    &lt;body name=&quot;cube&quot; pos=&quot;-0.25 0 0.08&quot;&gt;
+      &lt;joint name=&quot;cube_free&quot; type=&quot;free&quot;/&gt;
+      &lt;geom type=&quot;box&quot; size=&quot;0.04 0.04 0.04&quot; rgba=&quot;0.1 0.4 1 1&quot;/&gt;
+    &lt;/body&gt;
+
+    &lt;body name=&quot;gripper&quot; mocap=&quot;true&quot; pos=&quot;-0.25 0 0.25&quot;&gt;
+      &lt;geom type=&quot;sphere&quot; size=&quot;0.035&quot; rgba=&quot;1 0.2 0.2 1&quot;/&gt;
+    &lt;/body&gt;
+
+    &lt;geom name=&quot;target&quot; type=&quot;cylinder&quot; pos=&quot;0.25 0 0.04&quot; size=&quot;0.06 0.005&quot; rgba=&quot;0.2 1 0.2 1&quot;/&gt;
+  &lt;/worldbody&gt;
+&lt;/mujoco&gt;
+&quot;&quot;&quot;
+
+
+class Policy(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(9, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 3)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def expert_action(gripper, cube, target):
+    above_cube = cube + np.array([0, 0, 0.18])
+    grasp_pos = cube + np.array([0, 0, 0.06])
+    above_target = target + np.array([0, 0, 0.18])
+    place_pos = target + np.array([0, 0, 0.08])
+
+    dist_to_cube = np.linalg.norm(gripper[:2] - cube[:2])
+    holding = np.linalg.norm(gripper - grasp_pos) &lt; 0.06 or cube[2] &gt; 0.12
+
+    if not holding:
+        goal = above_cube if dist_to_cube &gt; 0.03 else grasp_pos
+    else:
+        goal = above_target if np.linalg.norm(gripper[:2] - target[:2]) &gt; 0.03 else place_pos
+
+    action = goal - gripper
+    return np.clip(action, -0.03, 0.03)
+
+
+def get_state(gripper, cube, target):
+    return np.concatenate([gripper, cube, target]).astype(np.float32)
+
+
+def set_cube_pos(data, pos):
+    data.qpos[:3] = pos
+    data.qpos[3:7] = np.array([1, 0, 0, 0])
+
+
+model = mujoco.MjModel.from_xml_string(XML)
+data = mujoco.MjData(model)
+
+target = np.array([0.25, 0.0, 0.08])
+
+states = []
+actions = []
+
+# Generate expert demonstrations
+for episode in range(80):
+    cube = np.array([
+        np.random.uniform(-0.35, -0.15),
+        np.random.uniform(-0.12, 0.12),
+        0.08
+    ])
+    gripper = cube + np.array([0, 0, 0.22])
+    holding = False
+
+    for t in range(120):
+        action = expert_action(gripper, cube, target)
+
+        states.append(get_state(gripper, cube, target))
+        actions.append(action.astype(np.float32))
+
+        gripper = gripper + action
+
+        if np.linalg.norm(gripper - (cube + np.array([0, 0, 0.06]))) &lt; 0.06:
+            holding = True
+
+        if holding:
+            cube = gripper - np.array([0, 0, 0.06])
+
+        if holding and np.linalg.norm(cube[:2] - target[:2]) &lt; 0.04 and cube[2] &lt; 0.12:
+            holding = False
+
+states = torch.tensor(np.array(states))
+actions = torch.tensor(np.array(actions))
+
+policy = Policy()
+optimizer = optim.Adam(policy.parameters(), lr=1e-3)
+loss_fn = nn.MSELoss()
+
+# Behaviour cloning training
+for epoch in range(200):
+    pred = policy(states)
+    loss = loss_fn(pred, actions)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    if epoch % 50 == 0:
+        print(f&quot;epoch {epoch}, loss = {loss.item():.5f}&quot;)
+
+
+# Roll out learned policy and render video
+renderer = mujoco.Renderer(model, height=480, width=640)
+frames = []
+
+cube = np.array([-0.28, 0.08, 0.08])
+gripper = cube + np.array([0, 0, 0.22])
+holding = False
+
+for t in range(160):
+    state = torch.tensor(get_state(gripper, cube, target)).unsqueeze(0)
+
+    with torch.no_grad():
+        action = policy(state).numpy()[0]
+
+    action = np.clip(action, -0.03, 0.03)
+    gripper = gripper + action
+
+    if np.linalg.norm(gripper - (cube + np.array([0, 0, 0.06]))) &lt; 0.06:
+        holding = True
+
+    if holding:
+        cube = gripper - np.array([0, 0, 0.06])
+
+    if holding and np.linalg.norm(cube[:2] - target[:2]) &lt; 0.04 and cube[2] &lt; 0.12:
+        holding = False
+
+    data.mocap_pos[0] = gripper
+    set_cube_pos(data, cube)
+    mujoco.mj_forward(model, data)
+
+    renderer.update_scene(data, camera=&quot;cam&quot;)
+    frames.append(renderer.render())
+
+imageio.mimsave(&quot;bc_pickplace.mp4&quot;, frames, fps=30)
+print(&quot;Saved bc_pickplace.mp4&quot;)</code></pre>
+          </details>
+
+          <figure class="article-video">
+            <video controls preload="metadata">
+              <source src="bc_pickplace.mp4" type="video/mp4" />
+              Your browser does not support the video tag.
+            </video>
+            <figcaption>
+              This is the video produced by the code. The goal is to move the robot arm, shown as the red ball, from the
+              blue cube to the green circle.
+            </figcaption>
+          </figure>
+
+          <p>This is the part that I want you to look into:</p>
+          <pre><code class="language-python">def expert_action(gripper, cube, target):
+    above_cube = cube + np.array([0, 0, 0.18])
+    grasp_pos = cube + np.array([0, 0, 0.06])
+    above_target = target + np.array([0, 0, 0.18])
+    place_pos = target + np.array([0, 0, 0.08])
+
+    dist_to_cube = np.linalg.norm(gripper[:2] - cube[:2])
+    holding = np.linalg.norm(gripper - grasp_pos) &lt; 0.06 or cube[2] &gt; 0.12
+
+    if not holding:
+        goal = above_cube if dist_to_cube &gt; 0.03 else grasp_pos
+    else:
+        goal = above_target if np.linalg.norm(gripper[:2] - target[:2]) &gt; 0.03 else place_pos
+
+    action = goal - gripper
+    return np.clip(action, -0.03, 0.03)</code></pre>
+
+          <p>
+            The expert action is the hand-coded demonstration signal for moving from the cube to the green circle. The
+            behaviour cloning model learns directly from these state-action examples.
+          </p>
+          <pre><code class="language-python">loss_fn = nn.MSELoss()</code></pre>
+          <p>
+            In this quick demonstration, mean squared error penalizes the difference between the predicted action and the
+            demonstrated expert action.
+          </p>
+
+          <div class="callout">
+            <strong>Note:</strong> Even though this technique as a standalone method can struggle on complex tasks, it is
+            often useful for pretraining or warm-starting reinforcement learning.
+          </div>
+        </section>
+      </article>
+    </main>
+  </body>
+</html>

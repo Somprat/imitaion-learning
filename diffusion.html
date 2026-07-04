@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Diffusion Model - Robotics Learning Notes</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css?v=4" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="index.html">Robotics Learning Notes</a>
+      <nav aria-label="Main navigation">
+        <a class="nav-link" href="index.html">Welcome!</a>
+        <a class="nav-link" href="behaviour-cloning.html">Behaviour Cloning</a>
+        <a class="nav-link" href="act.html">ACT</a>
+        <a class="nav-link active" href="diffusion.html">Diffusion Model</a>
+      </nav>
+    </header>
+
+    <main class="page-shell">
+      <article class="article-layout">
+        <aside class="article-kicker" aria-label="Article summary">
+          <span class="section-label">Policy 03</span>
+          <p>From noisy images to robot actions, diffusion models learn to reverse noise step by step.</p>
+        </aside>
+
+        <section class="article-content">
+          <p class="eyebrow">Robot Learning</p>
+          <h1>Diffusion Model</h1>
+          <p class="subtitle">A high level explanation of diffusion models and diffusion policy for robotics.</p>
+
+          <p>
+            Diffusion models became especially popular for image and video generation. Many AI products now include image
+            generators that use diffusion-style ideas, but a large language model itself is not the same thing as a
+            diffusion model.
+          </p>
+          <p>
+            In robotics, Chi et al. introduced diffusion policy by combining diffusion-style generation with robot learning.
+            The idea is simple: instead of creating pictures, these models create actions for robots.
+          </p>
+
+          <h2>Diffusion Model</h2>
+          <p>
+            To understand diffusion policy, we will touch on the concept of diffusion models for images and video first
+            to build an important foundation.
+          </p>
+          <p>Imagine some random pixel image. This is exactly what the diffusion model has at the beginning.</p>
+          <p>
+            Now, say the user asks, "give me a mountain with a beautiful lake picture." The diffusion model would convert
+            this random image into the mountain and lake image that the user desires.
+          </p>
+          <figure class="article-figure">
+            <img src="images/denoisemountain.png" alt="A diffusion denoising process that turns noise into a mountain lake image" />
+            <figcaption>
+              A high level view of denoising: random pixels gradually become the target image.
+              Image credit:
+              <a href="https://www.pixova.io/blog/what-is-text-to-image-ai">Pixova</a>.
+            </figcaption>
+          </figure>
+
+          <p>
+            That is already enough for a super high level understanding of the diffusion model. It basically converts a
+            noisy picture into something that the user wants.
+          </p>
+
+
+          <h2>How Does It Learn?</h2>
+          <p>
+            Just like a normal machine learning model, it was trained with lots of data. However, unlike a Triceratops vs.
+            T. rex classifier, where you train it with pictures saying which one is which, this model is trained by
+            reversing the process of its own task.
+          </p>
+          <p>
+            To clarify that, in the training phase, the model is given a picture of, say, a cocker spaniel. Then we add
+            noise to this picture until it becomes close to a random pixel picture, just like the beginning of the
+            generation process. While we add the noise, the model learns to predict the noise that was added. Think of it
+            like the model observing how noise changes the picture.
+          </p>
+          <p>
+            So now, if the model is asked to generate a cocker spaniel picture from a random pixel picture, it knows how
+            to denoise toward that kind of image. But if it was asked to generate an owl and it had never learned from
+            owl-like examples, the model would have trouble doing that.
+          </p>
+          <p>
+            That is why we train it with millions of pictures, repeating the same process of adding noise from a good
+            picture to a random noise picture. The model learns this adding-noise process and tries to reverse it. In the
+            end, a good diffusion model should generalize well enough that it can create many different pictures.
+          </p>
+          <p>
+            Again, the process is: given the user's prompt, the model creates a random noise picture. Then it tries to
+            denoise it according to the user's prompt. That is it.
+          </p>
+
+          <h2>In Robotics</h2>
+          <p>
+            Now you should have a good understanding of how the diffusion model works. In robotics, it is the same
+            general idea, but instead of images, the model works with actions. The policy starts from completely random
+            actions and gradually denoises them into actions that look like the expert demonstrations it was trained on.
+          </p>
+          <p>Here is the full example code:</p>
+
+          <details class="code-details">
+            <summary>View full diffusion policy example</summary>
+            <pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import mujoco
+import imageio
+
+
+XML = &quot;&quot;&quot;
+&lt;mujoco&gt;
+  &lt;option timestep=&quot;0.02&quot; gravity=&quot;0 0 -9.81&quot;/&gt;
+
+  &lt;worldbody&gt;
+    &lt;light pos=&quot;0 0 3&quot;/&gt;
+    &lt;camera name=&quot;cam&quot; pos=&quot;1.2 -1.2 0.9&quot; xyaxes=&quot;1 1 0 -0.4 0.4 1&quot;/&gt;
+
+    &lt;geom name=&quot;table&quot; type=&quot;box&quot; pos=&quot;0 0 0&quot; size=&quot;0.6 0.4 0.03&quot; rgba=&quot;0.6 0.6 0.6 1&quot;/&gt;
+
+    &lt;body name=&quot;cube&quot; pos=&quot;-0.25 0 0.08&quot;&gt;
+      &lt;joint name=&quot;cube_free&quot; type=&quot;free&quot;/&gt;
+      &lt;geom type=&quot;box&quot; size=&quot;0.04 0.04 0.04&quot; rgba=&quot;0.1 0.4 1 1&quot;/&gt;
+    &lt;/body&gt;
+
+    &lt;body name=&quot;gripper&quot; mocap=&quot;true&quot; pos=&quot;-0.25 0 0.25&quot;&gt;
+      &lt;geom type=&quot;sphere&quot; size=&quot;0.035&quot; rgba=&quot;1 0.2 0.2 1&quot;/&gt;
+    &lt;/body&gt;
+
+    &lt;geom name=&quot;target&quot; type=&quot;cylinder&quot; pos=&quot;0.25 0 0.04&quot; size=&quot;0.06 0.005&quot; rgba=&quot;0.2 1 0.2 1&quot;/&gt;
+  &lt;/worldbody&gt;
+&lt;/mujoco&gt;
+&quot;&quot;&quot;
+
+
+def expert_action(gripper, cube, target):
+    above_cube = cube + np.array([0, 0, 0.18])
+    grasp_pos = cube + np.array([0, 0, 0.06])
+    above_target = target + np.array([0, 0, 0.18])
+    place_pos = target + np.array([0, 0, 0.08])
+
+    dist_to_cube = np.linalg.norm(gripper[:2] - cube[:2])
+    holding = np.linalg.norm(gripper - grasp_pos) &lt; 0.06 or cube[2] &gt; 0.12
+
+    if not holding:
+        goal = above_cube if dist_to_cube &gt; 0.03 else grasp_pos
+    else:
+        goal = above_target if np.linalg.norm(gripper[:2] - target[:2]) &gt; 0.03 else place_pos
+
+    action = goal - gripper
+    return np.clip(action, -0.03, 0.03)
+
+
+def get_state(gripper, cube, target):
+    return np.concatenate([gripper, cube, target]).astype(np.float32)
+
+
+def set_cube_pos(data, pos):
+    data.qpos[:3] = pos
+    data.qpos[3:7] = np.array([1, 0, 0, 0])
+
+
+HORIZON = 8       # number of future actions predicted at once
+STATE_DIM = 9
+ACTION_DIM = 3
+TIMESTEPS = 20    # diffusion denoising steps
+
+all_states = []
+all_action_chunks = []
+
+target = np.array([0.25, 0.0, 0.08])
+
+for episode in range(120):
+    cube = np.array([
+        np.random.uniform(-0.35, -0.15),
+        np.random.uniform(-0.12, 0.12),
+        0.08
+    ])
+    gripper = cube + np.array([0, 0, 0.22])
+    holding = False
+
+    states = []
+    actions = []
+
+    for t in range(140):
+        state = get_state(gripper, cube, target)
+        action = expert_action(gripper, cube, target)
+
+        states.append(state)
+        actions.append(action.astype(np.float32))
+
+        gripper = gripper + action
+
+        if np.linalg.norm(gripper - (cube + np.array([0, 0, 0.06]))) &lt; 0.06:
+            holding = True
+
+        if holding:
+            cube = gripper - np.array([0, 0, 0.06])
+
+        if holding and np.linalg.norm(cube[:2] - target[:2]) &lt; 0.04 and cube[2] &lt; 0.12:
+            holding = False
+
+    states = np.array(states)
+    actions = np.array(actions)
+
+    # Turn expert trajectory into training pairs:
+    # current state -&gt; next H expert actions
+    for i in range(len(states) - HORIZON):
+        all_states.append(states[i])
+        all_action_chunks.append(actions[i:i + HORIZON])
+
+all_states = torch.tensor(np.array(all_states), dtype=torch.float32)
+all_action_chunks = torch.tensor(np.array(all_action_chunks), dtype=torch.float32)
+
+print(&quot;states:&quot;, all_states.shape)
+print(&quot;action chunks:&quot;, all_action_chunks.shape)
+
+
+class DiffusionPolicy(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        # input = noisy action chunk + state + diffusion timestep
+        input_dim = HORIZON * ACTION_DIM + STATE_DIM + 1
+        output_dim = HORIZON * ACTION_DIM
+
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, output_dim)
+        )
+
+    def forward(self, noisy_actions, state, timestep):
+        batch_size = noisy_actions.shape[0]
+
+        noisy_flat = noisy_actions.reshape(batch_size, -1)
+        timestep = timestep.reshape(batch_size, 1)
+
+        x = torch.cat([noisy_flat, state, timestep], dim=1)
+        predicted_noise = self.net(x)
+
+        return predicted_noise.reshape(batch_size, HORIZON, ACTION_DIM)
+
+
+policy = DiffusionPolicy()
+optimizer = optim.Adam(policy.parameters(), lr=1e-3)
+loss_fn = nn.MSELoss()
+
+
+# Simple noise schedule
+betas = torch.linspace(1e-4, 0.02, TIMESTEPS)
+alphas = 1.0 - betas
+alpha_bars = torch.cumprod(alphas, dim=0)
+
+
+for epoch in range(500):
+    batch_idx = torch.randint(0, all_states.shape[0], (256,))
+
+    state = all_states[batch_idx]
+    clean_actions = all_action_chunks[batch_idx]
+
+    # randomly choose diffusion timestep
+    t = torch.randint(0, TIMESTEPS, (256,))
+    alpha_bar = alpha_bars[t].reshape(-1, 1, 1)
+
+    # add noise to expert actions
+    noise = torch.randn_like(clean_actions)
+    noisy_actions = torch.sqrt(alpha_bar) * clean_actions + torch.sqrt(1 - alpha_bar) * noise
+
+    # model learns to predict the noise that was added
+    t_normalized = t.float() / TIMESTEPS
+    predicted_noise = policy(noisy_actions, state, t_normalized)
+
+    loss = loss_fn(predicted_noise, noise)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    if epoch % 100 == 0:
+        print(f&quot;epoch {epoch}, loss = {loss.item():.5f}&quot;)
+
+
+
+@torch.no_grad()
+def sample_action_chunk(policy, state):
+    policy.eval()
+
+    state = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+
+    # Start from pure random noise
+    actions = torch.randn(1, HORIZON, ACTION_DIM)
+
+    # Gradually denoise
+    for t in reversed(range(TIMESTEPS)):
+        t_tensor = torch.tensor([t / TIMESTEPS], dtype=torch.float32)
+
+        predicted_noise = policy(actions, state, t_tensor)
+
+        alpha = alphas[t]
+        alpha_bar = alpha_bars[t]
+        beta = betas[t]
+
+        actions = (1 / torch.sqrt(alpha)) * (
+            actions - ((1 - alpha) / torch.sqrt(1 - alpha_bar)) * predicted_noise
+        )
+
+        if t &gt; 0:
+            actions = actions + torch.sqrt(beta) * torch.randn_like(actions)
+
+    return actions.squeeze(0).numpy()
+
+model = mujoco.MjModel.from_xml_string(XML)
+data = mujoco.MjData(model)
+renderer = mujoco.Renderer(model, height=480, width=640)
+
+frames = []
+
+cube = np.array([-0.28, 0.08, 0.08])
+gripper = cube + np.array([0, 0, 0.22])
+holding = False
+
+for t in range(160):
+    state = get_state(gripper, cube, target)
+
+    # Diffusion predicts a chunk of future actions
+    action_chunk = sample_action_chunk(policy, state)
+
+    # Execute only the first action
+    action = action_chunk[0]
+    action = np.clip(action, -0.03, 0.03)
+
+    gripper = gripper + action
+
+    if np.linalg.norm(gripper - (cube + np.array([0, 0, 0.06]))) &lt; 0.06:
+        holding = True
+
+    if holding:
+        cube = gripper - np.array([0, 0, 0.06])
+
+    if holding and np.linalg.norm(cube[:2] - target[:2]) &lt; 0.04 and cube[2] &lt; 0.12:
+        holding = False
+
+    data.mocap_pos[0] = gripper
+    set_cube_pos(data, cube)
+    mujoco.mj_forward(model, data)
+
+    renderer.update_scene(data, camera=&quot;cam&quot;)
+    frames.append(renderer.render())
+
+imageio.mimsave(&quot;diffusion_pickplace.mp4&quot;, frames, fps=30)
+print(&quot;Saved diffusion_pickplace.mp4&quot;)</code></pre>
+          </details>
+
+          <figure class="article-video">
+            <video controls preload="metadata">
+              <source src="diffusion_pickplace.mp4" type="video/mp4" />
+              Your browser does not support the video tag.
+            </video>
+            <figcaption>
+              This is the video produced by the code. The goal is to move the robot arm, shown as the red ball, from the
+              blue cube to the green circle.
+            </figcaption>
+          </figure>
+
+          <p>
+            Notice that the ball looks a little shaky. In this small demo, the policy samples from noise each time it
+            predicts and then executes only the first action from the sampled chunk. A stronger implementation would
+            usually add smoothing or reuse more of the predicted chunk.
+          </p>
+
+          <p>This code is really overwhelming, but this is the part to focus on first:</p>
+          <pre><code class="language-python">noise = torch.randn_like(clean_actions)
+
+noisy_actions = (
+    torch.sqrt(alpha_bar) * clean_actions
+    + torch.sqrt(1 - alpha_bar) * noise
+)</code></pre>
+          <p>
+            This is how we add noise to the action chunk. For image diffusion, the noise is added to pixels. For
+            diffusion policy, the noise is added to actions.
+          </p>
+
+          <pre><code class="language-python">actions = (1 / torch.sqrt(alpha)) * (
+    actions - ((1 - alpha) / torch.sqrt(1 - alpha_bar)) * predicted_noise
+)</code></pre>
+          <p>Then the model denoises the action chunk step by step.</p>
+          <p>
+            But that does not mean you need to code the whole thing every time you want to use diffusion models. In
+            general, pretrained diffusion models can often be loaded through libraries such as Hugging Face Diffusers.
+            The example below is for image generation, not the exact robotics policy above.
+          </p>
+          <pre><code class="language-python">from diffusers import DiffusionPipeline
+import torch
+
+# Load the pretrained model
+pipe = DiffusionPipeline.from_pretrained(
+    "CompVis/stable-diffusion-v1-4",
+    torch_dtype=torch.float16
+)
+
+# Move the pipeline to the GPU for significantly faster inference
+pipe.to("cuda")
+
+# Generate an image
+prompt = "A futuristic city in the style of cyberpunk"
+image = pipe(prompt).images[0]
+
+# Save or display the image
+image.save("generated_image.png")</code></pre>
+          <!-- <p>For those who want to do research or are just obsessed with how we actually compute this, follow me.</p>
+
+          <h2>Math Prerequisites</h2>
+          <p>
+            Some probability knowledge that could be good to have includes Normal or Gaussian Distribution and the
+            property of scaling the mean and the variance. But even if you do not know what these are, I will explain it
+            in a simple way.
+          </p>
+          <p>
+            The Gaussian distribution happens when the distribution is normal, which can be written in the form
+            <code>N(mu, sigma^2)</code>, where <code>mu</code> is the mean and <code>sigma^2</code> is the variance. If
+            we say data like the number of ice creams sold each day in a week has a distribution of <code>N(6, 7)</code>,
+            that means the average number of ice creams sold is 6 and the variance is 7.
+          </p>
+          <p>
+            Another important thing to know is that if the data is scaled up, the mean will be scaled by the same number
+            and the variance will be scaled by that number squared. A concrete example is if we multiply the number of ice
+            creams sold each day by 2, then the new mean becomes <code>6 * 2 = 12</code> and the variance becomes
+            <code>2^2 * 7 = 28</code>.
+          </p>
+          <p>That should already be enough for the prerequisites.</p>
+
+          <h2>The Diffusion Formula</h2>
+          <p>
+            The way the diffusion model works is that it is initialized as <code>N(0, I)</code>, where <code>I</code> is
+            the identity matrix. Then it keeps getting multiplied with <code>sqrt(1 - beta_t)</code>.
+          </p>
+          <div class="formula">
+            q(x<sub>t</sub> | x<sub>t-1</sub>) =
+            N(sqrt(1 - &beta;<sub>t</sub>)x<sub>t-1</sub>, &beta;<sub>t</sub>I)
+          </div>
+          <p>
+            That is a lot of math notation, but let's explain it on a high level. On the left side, <code>q</code> is the
+            probability distribution of the image, with <code>x_t</code> denoting the image at time <code>t</code>. In
+            short, the left side is saying the probability distribution of the image at time <code>t</code> given the
+            image at time <code>t - 1</code>.
+          </p>
+          <p>
+            The right side is the normal distribution notation, with the mean equal to
+            <code>sqrt(1 - beta_t) * x_(t-1)</code>. The variance is multiplied by <code>beta_t</code>. Then we keep
+            doing this, multiplying the data by <code>sqrt(1 - beta_t)</code>. Note that <code>beta_t</code> will not be
+            the same each time. The ultimate goal of this is to make the mean approach 0.
+          </p>
+
+          <div class="callout">
+            <strong>Research note:</strong> In practice, we often use a pretrained model. Still, understanding the math
+            behind diffusion is crucial for academic conversations, especially if you want to get deeper into research.
+          </div> -->
+        </section>
+      </article>
+    </main>
+  </body>
+</html>
